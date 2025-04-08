@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.env
+chroma_db/
+.ipynb_checkpoints/
+*.log
+otter-detection/
