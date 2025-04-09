@@ -17,3 +17,5 @@ langchain-chroma
 langchain-ollama
 openai
 streamlit
+# ConversationalRetrievalQA
+streamlit-chat
