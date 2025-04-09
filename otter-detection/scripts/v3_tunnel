@@ -1,0 +1,49 @@
+#!/usr/bin/python3
+
+import subprocess
+from os.path import exists
+
+
+def write_key(key_path):
+    if exists(key_path):
+        return
+    with open(key_path, "w") as f:
+        f.write(f"""
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDkxYVEcgHUALkEn3lAANskWqdN6wj9/kT+Hvr55QAApAAAAKg9uS1EPbkt
+RAAAAAtzc2gtZWQyNTUxOQAAACDkxYVEcgHUALkEn3lAANskWqdN6wj9/kT+Hvr55QAApA
+AAAEA38DL5FJE1iFJVRRCV4AfjnTqTcxqrQ4dZs2iAxSTOQeTFhURyAdQAuQSfeUAA2yRa
+p03rCP3+RP4e+vnlAACkAAAAHmhhbmdAaGFuZy1YNTcwUy1JLUFPUlVTLVBSTy1BWAECAw
+QFBgc=
+-----END OPENSSH PRIVATE KEY-----
+        """.lstrip("\n"))
+    subprocess.run(["chmod", "0600", key_path], check=True)
+
+
+def main(device_name):
+    key_path = f"/tmp/private_key"
+    write_key(key_path)
+    for ssh_port in [36832, 22]:  # Fallback 22 must be there
+        try:
+            print(f"Trying SSH with port {ssh_port}")
+            subprocess.run(f"""
+                ssh -N -p {ssh_port} -i {key_path}
+                -o ConnectTimeout=10
+                -o ServerAliveInterval=30
+                -o ServerAliveCountMax=3
+                -o ExitOnForwardFailure=yes
+                -o StrictHostKeyChecking=no
+                -R /home/tunnel/cag_otter/{device_name}/22:localhost:22
+                -R /home/tunnel/cag_otter/{device_name}/80:localhost:80
+                tunnel@ai.v3nity.com
+            """.strip().split(), check=True)
+            # Once one of the port success, dont try other port anymore
+            return
+        except Exception as e:
+            print(e)
+
+
+if __name__ == "__main__":
+    from sys import argv
+    main(argv[1])

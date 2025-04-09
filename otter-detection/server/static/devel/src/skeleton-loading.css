@@ -1,0 +1,22 @@
+.skeleton-loading {
+    width: 128px;
+    height: 16px;
+    display: inline-block;
+    background: linear-gradient(-45deg, #0002 50%, #0001 70%, #0002 100%);
+    background-size: 200% 100%;
+    animation: skeleton-loading-keyframes 1s infinite linear;
+}
+
+@keyframes skeleton-loading-keyframes {
+    0% {
+        background-position: 100% 0;
+    }
+
+    50% {
+        background-position: -100% 0;
+    }
+
+    100% {
+        background-position: -100% 0;
+    }
+}

@@ -1,0 +1,59 @@
+version: "2.4" # mem_limit
+
+services:
+
+  nginx:
+    image: nginx
+    restart: unless-stopped
+    ports:
+      - 80:80
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/nginx.passwd:/nginx/nginx.passwd
+      - ./static:/static
+      
+  app:
+    build: docker
+    restart: unless-stopped
+    working_dir: /root
+    command: python3 /src/main.py
+    volumes: 
+      - ./src:/src:ro
+      - ./engines:/engines:ro
+      - ./storage:/storage
+      - ./static/frames/:/frames
+      - /usr/bin/tegrastats:/usr/bin/tegrastats:ro
+    mem_limit: 2G
+
+  recorder:
+    build: docker
+    # NOTE: Restricted restart policy to prevent USB disk to go overdrive and fail
+    restart: unless-stopped
+    command: python3 /src/recorder.py
+    volumes:
+      - ./src/recorder:/src/:ro
+      - ./storage/recorder:/videos
+      - /dev/:/dev/
+    privileged: true
+    mem_limit: 1G
+
+  playback:
+    build: docker
+    restart: unless-stopped
+    command: /src/playback.py
+    volumes: 
+      - ./src/recorder:/src:ro
+      - ./storage/recorder:/videos
+      - /dev/:/dev/
+    privileged: true
+    mem_limit: 1G
+
+  fan_controller:
+    build: docker
+    restart: unless-stopped
+    command: python3 /src/script.py
+    volumes: 
+      - ./src/fan_controller:/src:ro
+      - /dev/:/dev/
+    privileged: true # NOTE: For epever and GPIO access
+    mem_limit: 1G

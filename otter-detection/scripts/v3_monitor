@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+
+def nmcli():
+    from subprocess import run
+    pipe = run(["nmcli", "d"], capture_output=True, check=True)
+    header, *rows = [x.split() for x in pipe.stdout.decode().splitlines()]
+    rows = [dict(zip(header, row)) for row in rows]
+    data = {}
+    for row in rows:
+        if row["TYPE"] in ["gsm"]:
+            data["network_gsm_state"] = row["STATE"]
+        elif row["TYPE"] in ["ethernet"]:
+            # NOTE: CONNECTION poe for otterbox1, the rest should be DEVICE eth1
+            if row["DEVICE"] in ["eth1"] or row["CONNECTION"] in ["poe"]:
+                data["network_poe_state"] = row["STATE"]
+    return data
+
+
+def mmcli():
+    from subprocess import run
+    import json
+    mmcli = ["mmcli", "-m", "0"]
+    pipe = run([*mmcli, "--output-json"], capture_output=True, check=True)
+    data = json.loads(pipe.stdout.decode())
+    modem = data.get("modem", {})
+    generic = modem.get("generic", {})
+    own_numbers = generic.get("own-numbers", [])
+    signal_quality = generic.get("signal-quality", {}).get("value")
+    # GNSS
+    # # NOTE: First iteration may fail to get satellite fix.
+    # #       Just give it some time and try again on next iteration
+    # pipe = run([*mmcli, "--location-enable-gps-nmea"])
+    # pipe = run([*mmcli, "--location-get"], capture_output=True, check=True)
+    # data = pipe.stdout.decode()
+    # lat, lon = None, None
+    # if "$GPRMC" in data:
+    #     gprmc = data.split("$GPRMC,")[1].split("\n")[0].strip()
+    #     utc, status, lat0, _, lon0, *_ = gprmc.split(",")
+    #     if status in ["A"]:
+    #         lat, lon = float(lat0), float(lon0)
+
+    return dict(
+        modem_operator_name=modem.get("3gpp", {}).get("operator-name"),
+        modem_signal_quality=int(signal_quality),
+        modem_state=generic.get("state"),
+        modem_number=own_numbers[0] if own_numbers else None,
+        # gps_latitude=lat,
+        # gps_longitude=lon,
+    )
+
+
+def uptime():
+    from subprocess import run
+    from datetime import datetime
+    pipe = run(["uptime", "-s"], capture_output=True, check=True)
+    dt = datetime.strptime(pipe.stdout.decode().strip(), "%Y-%m-%d %H:%M:%S")
+    uptime = (datetime.now() - dt).total_seconds()
+    pipe = run(["who"], capture_output=True, check=True)
+    num_user = len(pipe.stdout.decode().strip().splitlines())
+    return dict(uptime=uptime, active_user=num_user)
+
+def vnstat():
+    from subprocess import run
+    cmd = ["vnstat", "--iface", "ppp0", "--oneline", "b"]
+    pipe = run(cmd, capture_output=True)
+    # Error: Interface "ppp0" not found in database
+    if pipe.returncode not in [0]:
+        print(f"vnstat: {pipe.stdout.decode().strip()}")
+        return
+    values = pipe.stdout.decode().split(";")
+    return dict(
+        modem_daily_rx=int(values[3]),
+        modem_daily_tx=int(values[4]),
+        modem_monthly_rx=int(values[8]),
+        modem_monthly_tx=int(values[9]),
+    )
+
+
+def tegrastats():
+    from subprocess import run
+    from re import search
+    cmd = "tegrastats | head -n1"
+    pipe = run(cmd, shell=True, capture_output=True, check=True)
+    line = pipe.stdout.decode()
+    ram_values = search(r"RAM (\d+)/(\d+)", line)
+    ram_usage, ram_total = int(ram_values[1]), int(ram_values[2])
+    gpu_percents = [int(x.split()[1].split("%")[0])
+                    for x in line.split("GR3D")[1:]]
+    cpu_percents = [int(x.split("%@")[0])
+                    for x in line.split("CPU [")[1].split("]")[0].split(",") if "%@" in x]
+    return dict(
+        tegrastats_ram_percent=round(ram_usage / ram_total * 100, 3),
+        tegrastats_cpu_percent=max(cpu_percents),
+        tegrastats_gpu_percent=max(gpu_percents),
+        tegrastats_tj=float(search(r"tj@([\d\.]+)C", line)[1]),
+        tegrastats_vdd_in=int(search(r"VDD_IN (\d+)mW", line)[1]) / 1000,
+    )
+
+
+def epever():
+    from glob import glob
+    from epevermodbus.driver import EpeverChargeController
+    for device_path in sorted(glob("/dev/ttyACM*")):
+        try:
+            x = EpeverChargeController(device_path, 1)
+            print(f"Found epever controller at {device_path}")
+            return dict(
+                epever_solar_voltage=x.get_solar_voltage(),
+                epever_solar_current=x.get_solar_current(),
+                epever_solar_power=x.get_solar_power(),
+                # NOTE: Same as battery_voltage
+                # epever_load_voltage=x.get_load_voltage(),
+                epever_load_current=x.get_load_current(),
+                epever_load_power=x.get_load_power(),
+                epever_battery_voltage=x.get_battery_voltage(),
+                epever_battery_current=x.get_battery_current(),
+                # NOTE: Same as solar_power
+                # epever_battery_power=x.get_battery_power(),
+                epever_battery_state_of_charge=x.get_battery_state_of_charge(),
+                epever_battery_temperature=x.get_battery_temperature(),
+                # NOTE: Always 0
+                # epever_remote_battery_temperature=x.get_remote_battery_temperature(),
+                epever_controller_temperature=x.get_controller_temperature(),
+                **{f"epever_{k}": v for k, v in x.get_battery_status().items()},
+                **{f"epever_charging_{k}": v for k, v in x.get_charging_equipment_status().items()
+                    if k not in "fault"},
+                **{f"epever_discharging_{k}": v for k, v in x.get_discharging_equipment_status().items()},
+                epever_is_day=x.is_day(),
+                # epever_is_night=x.is_night(),
+                epever_maximum_battery_voltage_today=x.get_maximum_battery_voltage_today(),
+                epever_minimum_battery_voltage_today=x.get_minimum_battery_voltage_today(),
+                epever_maximum_pv_voltage_today=x.get_maximum_pv_voltage_today(),
+                epever_minimum_pv_voltage_today=x.get_minimum_pv_voltage_today(),
+                epever_is_device_over_temperature=x.is_device_over_temperature(),
+                epever_consumed_energy_today=x.get_consumed_energy_today(),
+                epever_consumed_energy_this_month=x.get_consumed_energy_this_month(),
+                epever_consumed_energy_this_year=x.get_consumed_energy_this_year(),
+                epever_total_consumed_energy=x.get_total_consumed_energy(),
+                epever_generated_energy_today=x.get_generated_energy_today(),
+                epever_generated_energy_this_month=x.get_generated_energy_this_month(),
+                epever_generated_energy_this_year=x.get_generated_energy_this_year(),
+                epever_total_generated_energy=x.get_total_generated_energy(),
+                # epever_rtc=x.get_rtc().isoformat(),
+                epever_parameter_rated_charging_current=x.get_rated_charging_current(),
+                epever_parameter_rated_load_current=x.get_rated_load_current(),
+                epever_parameter_battery_real_rated_voltage=x.get_battery_real_rated_voltage(),
+                epever_parameter_battery_type=x.get_battery_type(),
+                epever_parameter_battery_capacity=x.get_battery_capacity(),
+                epever_parameter_temperature_compensation_coefficient=x.get_temperature_compensation_coefficient(),
+                epever_parameter_battery_rated_voltage=x.get_battery_rated_voltage(),
+                epever_parameter_default_load_on_off_in_manual_mode=x.get_default_load_on_off_in_manual_mode(),
+                epever_parameter_equalize_duration=x.get_equalize_duration(),
+                epever_parameter_boost_duration=x.get_boost_duration(),
+                epever_parameter_battery_discharge=x.get_battery_discharge(),
+                epever_parameter_battery_charge=x.get_battery_charge(),
+                epever_parameter_charging_mode=x.get_charging_mode(),
+                epever_parameter_over_voltage_disconnect_voltage=x.get_over_voltage_disconnect_voltage(),
+                epever_parameter_charging_limit_voltage=x.get_charging_limit_voltage(),
+                epever_parameter_over_voltage_reconnect_voltage=x.get_over_voltage_reconnect_voltage(),
+                epever_parameter_equalize_charging_voltage=x.get_equalize_charging_voltage(),
+                epever_parameter_boost_charging_voltage=x.get_boost_charging_voltage(),
+                epever_parameter_float_charging_voltage=x.get_float_charging_voltage(),
+                epever_parameter_boost_reconnect_charging_voltage=x.get_boost_reconnect_charging_voltage(),
+                epever_parameter_low_voltage_reconnect_voltage=x.get_low_voltage_reconnect_voltage(),
+                epever_parameter_under_voltage_recover_voltage=x.get_under_voltage_recover_voltage(),
+                epever_parameter_under_voltage_warning_voltage=x.get_under_voltage_warning_voltage(),
+                epever_parameter_low_voltage_disconnect_voltage=x.get_low_voltage_disconnect_voltage(),
+                epever_parameter_discharging_limit_voltage=x.get_discharging_limit_voltage(),
+            )
+        except:
+            pass
+
+
+def app_status():
+    storage_root = f"/home/v3/otter-detection/storage"
+    data = dict()
+    try:
+        with open(f"{storage_root}/num_positive") as f:
+            data["num_positive"] = int(f.read().strip())
+    except:
+        pass
+    try:
+        with open(f"{storage_root}/device_name") as f:
+            data["device_name"] = f.read().strip()
+    except:
+        pass
+    return data
+
+
+def forgiving_routine(f, *args, **kwargs):
+    from time import sleep
+    from traceback import format_exc
+    for _ in range(3):
+        try:
+            return f(*args, **kwargs)
+        except Exception:
+            print(f"Error in {f.__name__}. Retrying...")
+            print(format_exc())
+            sleep(3)
+    print(f"Give up {f.__name__}")
+
+
+def to_line_protocol(measurement, tags, fields):
+    from time import time
+    timestamp = fields.pop("timestamp", time())
+    if not isinstance(timestamp, str):
+        timestamp = int(timestamp)
+    prefix = [measurement]
+    for k, v in tags.items():
+        prefix.append(f"{k}={v}")
+    prefix = ",".join(x for x in prefix)
+    for k, v in fields.items():
+        if isinstance(v, str):
+            v = v.strip("'\"")
+            fields[k] = f'"{v}"'
+    fields = ",".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+    return f"{prefix} {fields} {timestamp}"
+
+
+def write_influx(data):
+    from traceback import format_exc
+    from time import sleep
+    import requests
+    token = "Wx2D4GIGio24Y7xGnz0emwVR735LCkgp9OnExmjr6AUn4VKyq4wAUmI3eP61X2AG4H5UiG1uvtTaUH62HvJBPg=="
+    for _ in range(3):
+        try:
+            res = requests.post(
+                f"https://ai.v3nity.com/influx/api/v2/write",
+                headers=dict(Authorization=f"Token {token}"),
+                params=dict(org="v3", bucket="cag_otter", precision="s"),
+                data=data,
+                timeout=1,
+            )
+            assert res.status_code in [204], res.text
+            print(f"Written {len(data)} bytes successfully")
+            return True
+        except Exception:
+            print(f"Error writing to Influx. Retrying...")
+            print(format_exc())
+            sleep(3)
+
+
+async def get_monitor_data():
+    import asyncio
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        loop = asyncio.get_running_loop()
+        results = await asyncio.gather(
+            loop.run_in_executor(executor, forgiving_routine, epever),
+            loop.run_in_executor(executor, forgiving_routine, nmcli),
+            loop.run_in_executor(executor, forgiving_routine, mmcli),
+            loop.run_in_executor(executor, forgiving_routine, uptime),
+            loop.run_in_executor(executor, forgiving_routine, vnstat),
+            loop.run_in_executor(executor, forgiving_routine, tegrastats),
+            loop.run_in_executor(executor, forgiving_routine, app_status),
+        )
+    results = [r for r in results if r is not None]
+    results = {k: v for r in results for k, v in r.items()}
+    return results
+
+
+def main(device_name):
+    import asyncio
+    from os.path import exists
+    from time import sleep
+    buffer_path = "/etc/v3_monitor_buffer.txt"
+    lines = []
+    if exists(buffer_path):
+        with open(buffer_path) as f:
+            lines = f.read().strip().splitlines()
+    tags = dict(device=device_name)
+    while True:
+        data = asyncio.run(get_monitor_data())
+        lines.append(to_line_protocol("cag_otter", tags, data))
+        for line in list(lines):
+            if write_influx(line):
+                lines.pop(0)
+        # Leftover back to buffer
+        with open(buffer_path, "w") as f:
+            f.write("\n".join(lines))
+        sleep(100)
+
+
+if __name__ == "__main__":
+    from sys import argv
+    main(argv[1])

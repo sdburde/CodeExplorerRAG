@@ -1,0 +1,107 @@
+<meta charset=UTF-8>
+<!-- to suppress Mixed Content warning -->
+<meta http-equiv=Content-Security-Policy content=upgrade-insecure-requests>
+<title>V3 Video Analytics</title>
+
+<!-- Enable Android webapp -->
+<meta name=mobile-web-app-capable content=yes>
+<link rel="shortcut icon" sizes=512x512 href=assets/icon.png>
+
+<!-- Enable iOS webapp -->
+<meta name=apple-mobile-web-app-capable content=yes>
+<link rel="apple-touch-icon" sizes=512x512 href=assets/icon.png>
+
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, minimal-ui">
+
+<script src=assets/mwc.min.js></script>
+<link rel="stylesheet" href="styles.css">
+
+<script src=index.js type=module></script>
+
+<mwc-drawer hasHeader type=modal>
+    <span slot=title>
+        <div style="
+                margin-top: -0.5em; 
+                margin-bottom: -0.5em; 
+                display: flex; 
+                align-items: center; 
+                gap: 12px; 
+                height: 2em
+            ">
+            <img src=assets/v3_logo.png style="height: 90%">
+            <div style="width: 2; height: 100%; background: #0003; "></div>
+            <img src=assets/cag_logo.png style="height: 100%">
+        </div>
+    </span>
+    <div class=drawer style="height: 100%; display: flex; flex-direction: column">
+        <div style="flex: 1; overflow-y: auto; min-height: 256px">
+            <mwc-list id=EVENT_HISTORY_LIST></mwc-list>
+        </div>
+
+        <mwc-list>
+            <li divider role=separator></li>
+
+            <mwc-list-item graphic=icon twoline noninteractive>
+                <mwc-icon slot=graphic>thermometer</mwc-icon>
+                <span id=STATS_TEMPERATURE>-</span>
+                <span slot=secondary>System power and thermals</span>
+            </mwc-list-item>
+
+            <mwc-list-item graphic=icon onclick="location.href = location.pathname + 'recorder/'">
+                <mwc-icon slot=graphic>play_circle</mwc-icon>
+                <span style="margin-left: 4px">Video recorder</span>
+            </mwc-list-item>
+        </mwc-list>
+    </div>
+    <div slot=appContent style="display: flex; flex-direction: column; height: 100%">
+        <mwc-top-app-bar>
+            <mwc-icon-button slot=navigationIcon icon=menu></mwc-icon-button>
+            <div slot=title><img src=assets/v3_logo.png style="height: 1.5em; filter: contrast(0) brightness(10);">
+            </div>
+            <mwc-icon-button-toggle slot=actionItems id=OVERLAY_TOGGLE on onIcon=layers offIcon=layers_clear>
+            </mwc-icon-button-toggle>
+        </mwc-top-app-bar>
+        <div style="
+            flex: 1; 
+            align-items: center; 
+            gap: 8px; 
+            display: flex; 
+            flex-direction: column; 
+            margin: 16px;
+        ">
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;">
+                <mwc-button outlined id=PTZ_LOCK_BUTTON><a class=material-icons>lock</a></mwc-button>
+                <mwc-button outlined disabled data-pan=-60><a class=material-icons>arrow_back</a></mwc-button>
+                <mwc-button outlined disabled data-pan=+60><a class=material-icons>arrow_forward</a></mwc-button>
+                <mwc-button outlined disabled data-tilt=+60><a class=material-icons>arrow_upward</a></mwc-button>
+                <mwc-button outlined disabled data-tilt=-60><a class=material-icons>arrow_downward</a></mwc-button>
+                <mwc-button outlined disabled data-zoom=+10><a class=material-icons>zoom_in</a></mwc-button>
+                <mwc-button outlined disabled data-zoom=-10><a class=material-icons>zoom_out</a></mwc-button>
+            </div>
+            <div style="
+                max-width: 1280px; 
+                max-height: 720px; 
+                width: 100%; 
+                aspect-ratio: 16/9;
+                position: relative;
+                overflow: hidden; 
+            ">
+                <canvas id=BACKGROUND_CANVAS style="
+                    position: absolute; 
+                    top: 0; 
+                    left: 0; 
+                    width: 100%; 
+                    border: 1px solid #0008; 
+                "></canvas>
+                <canvas id=FOREGROUND_CANVAS style="position: absolute; top: 0; left: 0; width: 100%;"></canvas>
+            </div>
+
+        </div>
+
+    </div>
+    </div>
+</mwc-drawer>
+
+<mwc-snackbar>
+    <mwc-icon-button icon=close slot=dismiss></mwc-icon-button>
+</mwc-snackbar>

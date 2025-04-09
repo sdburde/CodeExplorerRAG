@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+
+timing_cache_path = "timing_cache.bin"
+
+
+def onnx_to_int8_engine(onnx_path, engine_path, image_root):
+
+    from glob import glob
+    from os.path import isfile
+
+    import onnx
+    import cv2
+    import numpy
+    from tqdm import tqdm
+    import tensorrt
+
+    import pycuda.driver as cuda
+    from pycuda import autoinit
+
+    if isfile(engine_path):
+        print(f"Skip {engine_path}")
+        return
+
+    calibration_path = onnx_path.replace(".onnx", f".bin")
+
+    # NOTE: IInt8EntropyCalibrator2 is preferred but otter objectness becomes near zero
+    class Calibrator(tensorrt.IInt8MinMaxCalibrator):
+        def __init__(self):
+            super().__init__()
+            onnx_input = onnx.load(onnx_path).graph.input
+            *_, ih, iw = onnx_input[0].type.tensor_type.shape.dim
+            self.iw, self.ih = iw.dim_value, ih.dim_value
+            self.device = cuda.mem_alloc(4 * 3 * self.iw * self.ih)
+            image_paths = glob(f"{image_root}/**/*.jpg", recursive=True)
+            self.generator = (i for i in tqdm(image_paths))
+
+        def get_batch_size(self):
+            return 1
+
+        def read_calibration_cache(self):
+            if isfile(calibration_path):
+                print(f"Reusing calibration cache {calibration_path}")
+                with open(calibration_path, "rb") as f:
+                    return f.read()
+
+        def get_batch(self, names):
+            try:
+                jpg_path = next(self.generator)
+            except StopIteration:
+                return None
+            image = cv2.imread(jpg_path)
+            image = cv2.resize(image, (self.iw, self.ih),
+                               interpolation=cv2.INTER_AREA)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = image.astype(numpy.float32) / 255  # Normalize
+            image = numpy.moveaxis(image, -2, 0)  # HWC -> CHW
+            image = numpy.ascontiguousarray(image)
+            cuda.memcpy_htod(self.device, image)
+            return [self.device]
+
+        def write_calibration_cache(self, buffer):
+            print(f"Writing calibration cache {calibration_path}")
+            with open(calibration_path, "wb") as f:
+                f.write(buffer)
+
+    logger = tensorrt.Logger(tensorrt.Logger.ERROR)
+    builder = tensorrt.Builder(logger)
+    flags = 1 << int(tensorrt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(flags=flags)
+    with open(onnx_path, "rb") as f:
+        assert tensorrt.OnnxParser(network, logger).parse(f.read())
+    config = builder.create_builder_config()
+    config.set_flag(tensorrt.BuilderFlag.FP16)
+    config.set_flag(tensorrt.BuilderFlag.INT8)
+    config.int8_calibrator = Calibrator()
+    # Read timing cache if available
+    if isfile(timing_cache_path):
+        print(f"Reusing timing cache {timing_cache_path}")
+        with open(timing_cache_path, "rb") as f:
+            timing_cache = config.create_timing_cache(f.read())
+    else:
+        timing_cache = config.create_timing_cache(b"")
+    config.set_timing_cache(timing_cache, ignore_mismatch=False)
+    print("Calibrating. This might take a while...")
+    engine = builder.build_serialized_network(network, config)
+    assert engine, f"Calibration failed"
+    with open(engine_path, "wb") as f:
+        f.write(engine)
+    print(f"Engine serialised to {engine_path}")
+    # Update timing cache
+    with open(timing_cache_path, "wb") as f:
+        f.write(config.get_timing_cache().serialize())
+    print(f"Timing cache written to {timing_cache_path}")
+
+
+def pt_to_onnx(pt_path, onnx_path, width, height):
+    from os.path import isfile
+    import sys
+    sys.path.append("/yolov7")
+    import torch
+
+    if isfile(onnx_path):
+        print(f"Skip {onnx_path}")
+        return
+    device = torch.device("cpu")
+    model = torch.load(pt_path, map_location=device)["model"]
+    with torch.no_grad():
+        model.float().eval().fuse()
+    # NOTE: Rescale xywh for normalisation
+    # NOTE: Stride need to decompose into wh as input is not square
+    wh = torch.Tensor([width, height])
+    stride = model.model[-1].stride
+    model.model[-1].concat = True
+    model.model[-1].anchor_grid /= wh
+    model.model[-1].stride = stride.unsqueeze(1).repeat(1, 2) / wh
+    X = torch.zeros(1, 3, height, width).to(device)
+    y = model(X)
+    torch.onnx.export(model, X, onnx_path, opset_version=12)
+    print(f"ONNX exported {onnx_path}")
+
+
+def onnx_to_fp16_engine(onnx_path, engine_path):
+    from os import remove
+    from os.path import isfile
+
+    if isfile(engine_path):
+        print(f"Skip {engine_path}")
+        return
+
+    import subprocess
+    subprocess.run([
+        "trtexec",
+        f"--onnx={onnx_path}",
+        f"--saveEngine={engine_path}",
+        f"--timingCacheFile={timing_cache_path}", "--fp16"], check=True)
+    lock_file = f"{timing_cache_path}.lock"
+    if isfile(lock_file):
+        remove(lock_file)
+
+
+def main():
+    pt_path = "20250301_best.pt"
+    # pt_path = "yolov7-w6.pt"
+    width = 1280
+    height = 704
+    precision = "int8"
+    precision = precision.lower()
+    # image_root = "mscoco2017_images512"
+    image_root = "otter_images512"
+
+    onnx_path = pt_path.replace(".pt", f"_{width}x{height}.onnx")
+    engine_path = onnx_path.replace(".onnx", f"_{precision}.engine")
+    pt_to_onnx(pt_path, onnx_path, width, height)
+    if precision in ["int8"]:
+        onnx_to_int8_engine(onnx_path, engine_path, image_root)
+    elif precision in ["fp16"]:
+        onnx_to_fp16_engine(onnx_path, engine_path)
+
+
+def run_in_docker():
+    import subprocess
+    from os import getcwd
+    cwd = getcwd()
+    image_name = "build_engine"
+    subprocess.run(["docker", "build", "../docker", f"--tag={image_name}"],
+                   check=True)
+    subprocess.run([
+        "docker", "run", "--rm", "-it",
+        "-v", f"{cwd}:{cwd}",
+        "-v", f"{__file__}:/script.py:ro",
+        f"--workdir={cwd}", image_name,
+        "python3", "-c",
+        "import sys; sys.path.append('/'); from script import main; main()"
+    ], check=True)
+
+
+if __name__ == "__main__":
+    run_in_docker()

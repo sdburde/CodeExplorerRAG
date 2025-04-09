@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+
+import subprocess
+from os.path import isfile, exists
+
+
+def main(executable_path):
+    assert isfile(executable_path), f"{executable_path} is not a file"
+    device_name = get_device_name()
+    from os.path import basename
+    from shutil import copy
+    service_name = basename(executable_path)
+    dst_path = f"/usr/local/bin/{service_name}"
+    if exists(dst_path):
+        print(f"\033[93m\033[1mWARNING:\033[0m Overwriting {dst_path}")
+    copy(executable_path, dst_path)
+    with open(f"/etc/systemd/system/{service_name}.service", "w") as f:
+        f.write(f"""
+[Unit]
+After=network.target
+[Service]
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+ExecStart={dst_path} {device_name}
+[Install]
+WantedBy=multi-user.target
+""".strip())
+    subprocess.run(["systemctl", "enable", service_name], check=True)
+    subprocess.run(["systemctl", "restart", service_name], check=True)
+    print(f"Enabled systemd service {service_name}")
+
+
+def get_device_name():
+    with open("/proc/device-tree/serial-number") as f:
+        serial_number = f.read().strip("\0")
+    device_name = {
+        "1421023064302": "otterbox1",
+        "1424823236972": "otterbox2",
+        "1425123203972": "otterbox3",
+        "1425123202425": "otterbox4",
+        "1423224361953": "otterbox5",
+        "1425123204435": "otterbox6",
+    }[serial_number]
+    print(f"Serial number {serial_number} -> {device_name}")
+    return device_name
+
+
+if __name__ == "__main__":
+    from sys import argv
+    main(argv[1])

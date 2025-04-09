@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+
+import subprocess
+
+context = dict()
+
+
+def gpu_load_routine():
+    from time import sleep
+    alpha = 0.9
+    with open("/sys/devices/platform/gpu.0/load") as f:
+        while True:
+            f.seek(0)
+            new_value = float(f.read()) / 10
+            old_value = context.get("gpu_load", new_value)
+            context["gpu_load"] = alpha * old_value + (1 - alpha) * new_value
+            sleep(1/20)
+
+
+def main():
+    pipe = subprocess.Popen(["tegrastats"], stdout=subprocess.PIPE)
+    while True:
+        parts = pipe.stdout.readline().decode().strip().split()
+        temperatures = []
+        row = {}
+        for i, part in enumerate(parts):
+            if part in ["RAM", "SWAP"]:
+                usage, total = [
+                    float(y) for y in parts[i + 1].split("MB")[0].split("/")]
+                row[part.lower()] = dict(usage=usage, total=total)
+            elif part in ["CPU"]:
+                cpu_parts = [
+                    [float(y) for y in x.split("%@")]
+                    for x in parts[i + 1][1:-1].split(",") if x not in ["off"]]
+                usages = [usage for usage, freq in cpu_parts]
+                frequencies = [freq for usage, freq in cpu_parts]
+                row["cpu"] = dict(usage=sum(usages) / len(usages),
+                                  freq=max(frequencies))
+            elif part.startswith("GR3D"):
+                usage, frequencies = parts[i + 1].split("%")
+                freqs = frequencies.strip("@").strip("[").strip("]").split(",")
+                freqs = [x for x in freqs if x]
+                max_freq = max(float(x) for x in freqs) if freqs else 0
+                row["gpu"] = dict(
+                    usage=context.get("gpu_load", float(usage)),
+                    # usage=float(usage),
+                    freq=max_freq,
+                )
+            elif part in ["VIC_FREQ"] or part.startswith("NVJPG") or part.startswith("NVDLA"):
+                if parts[i + 1] not in ["off"]:
+                    values = [float(y) for y in parts[i + 1].split("%@")]
+                    key = part.replace("_FREQ", "").lower()
+                    if len(values) == 2:
+                        row[key] = dict(usage=values[0], freq=values[1])
+                    elif len(values) == 1:
+                        row[key] = dict(usage=0, freq=values[0])
+                    else:
+                        print(f"Unknown {part} values", values)
+            elif part in ["NVENC", "NVDEC"]:
+                if parts[i + 1] not in ["off"]:
+                    freq = float(parts[i + 1])
+                    row[part.lower()] = freq
+            elif "VDD_IN" in part:
+                row["power"] = float(parts[i + 1].split("mW/")[0]) / 1000
+            elif "@" in part and part.endswith("C"):
+                temperatures.append(float(part.split("@")[1][:-1]))
+        row["temperature"] = max(temperatures)
+        # print(row)
+        columns = [
+            f"RAM{row['ram']['usage']/row['ram']['total']*100:02.0f}",
+            f"SWAP{row['swap']['usage']/row['swap']['total']*100:02.0f}",
+        ]
+        for key, x in row.items():
+            if isinstance(x, dict):
+                usage = x.get("usage")
+                freq = x.get("freq")
+                if usage is not None and freq is not None:
+                    k = key.upper()
+                    if k in ["CPU"]:
+                        columns.append(f"{k}{usage:02.0f}@{freq:04.0f}")
+                    else:
+                        columns.append(f"{k}{usage:02.0f}@{freq:03.0f}")
+        columns.append(f"ENC{row.get('nvenc', 0):03.0f}")
+        columns.append(f"DEC{row.get('nvdec', 0):03.0f}")
+        columns.append(f"TEMP{row['temperature']:02.0f}")
+        columns.append(f"POW{row.get('power', 0):04.1f}")
+        print(" ".join(columns))
+
+
+def write(path, value):
+    if str(read(path)) != str(value):
+        print(f"Write {path} <- {value}")
+        with open(path, "w") as f:
+            f.write(f"{value}")
+
+
+def read(path):
+    with open(path) as f:
+        return f.read().strip()
+
+
+# def config():
+#     cpu_paths = sorted(glob("/sys/devices/system/cpu/cpu?"))
+#     for cpu_path in cpu_paths:
+#         cpu_id = int(cpu_path.split("/cpu")[-1])
+#         cpu_root = f"/sys/devices/system/cpu/cpu{cpu_id}"
+#         if cpu_id < 4:  # Reduce CPU
+#             write(f"{cpu_root}/online", 1)
+#             freqs = read(f"{cpu_root}/cpufreq/scaling_available_frequencies")
+#             freqs = sorted(int(x) for x in freqs.split())
+#             min_frequency = freqs[0]
+#             # max_frequency = freqs[-1]
+#             max_frequency = freqs[len(freqs) // 2]  # Reduce half clock
+#             write(f"{cpu_root}/cpufreq/scaling_min_freq", min_frequency)
+#             write(f"{cpu_root}/cpufreq/scaling_max_freq", max_frequency)
+#         else:
+#             write(f"{cpu_root}/online", 0)
+
+
+if __name__ == "__main__":
+    from threading import Thread
+    Thread(target=gpu_load_routine, daemon=True).start()
+    main()

@@ -1,0 +1,1 @@
+![](static/assets/20241209_193233.jpg){width=512px}
