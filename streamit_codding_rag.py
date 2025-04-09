@@ -17,6 +17,7 @@ from langchain.chains import RetrievalQA
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_community.tools import DuckDuckGoSearchRun
 from streamlit_chat import message
 
 # --------------------------
@@ -146,11 +147,13 @@ def get_saved_chats() -> List[Dict]:
             try:
                 with open(filepath, 'r') as f:
                     chat_data = json.load(f)
+                    chat_name = chat_data.get("chat_name", "Unnamed Chat")
                     chats.append({
                         "session_id": chat_data["session_id"],
                         "timestamp": chat_data["timestamp"],
                         "filename": filename,
-                        "preview": chat_data["messages"][0]["content"][:50] + "..." if chat_data["messages"] else "Empty chat"
+                        "preview": chat_data["messages"][0]["content"][:50] + "..." if chat_data["messages"] else "Empty chat",
+                        "chat_name": chat_name
                     })
             except Exception:
                 continue  # Silently skip corrupted files
@@ -164,15 +167,21 @@ def load_chat_session(session_id: str) -> Optional[Dict]:
             return json.load(f)
     return None
 
-def save_chat_history(session_id: str, messages: List[Dict]) -> None:
+def save_chat_history(session_id: str, messages: List[Dict], chat_name: str = None) -> None:
     """Save chat history to a JSON file."""
+    if not messages:
+        return  # Don't save empty chats
+    
     filename = os.path.join(CHAT_HISTORY_DIR, f"{session_id}.json")
+    data = {
+        "session_id": session_id,
+        "timestamp": datetime.now().isoformat(),
+        "messages": messages
+    }
+    if chat_name:
+        data["chat_name"] = chat_name
     with open(filename, 'w') as f:
-        json.dump({
-            "session_id": session_id,
-            "timestamp": datetime.now().isoformat(),
-            "messages": messages
-        }, f, indent=2)
+        json.dump(data, f, indent=2)
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
     """Get or create chat history for a session."""
@@ -190,6 +199,43 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
     
     return store[session_id]
 
+def generate_chat_name(messages: List[Dict], llm: ChatGroq) -> str:
+    """Generate a name for the chat session based on the conversation."""
+    if len(messages) < 2:
+        return "New Chat"
+    
+    # Extract conversation content
+    content = ""
+    for msg in messages[:4]:  # Use first 4 messages max
+        if msg['type'] == 'human':
+            content += f"User: {msg['content']}\n"
+        else:
+            content += f"AI: {msg['content']}\n"
+    
+    # Try to generate a concise title
+    try:
+        prompt = f"""Based on this conversation, create a very short (2-4 word) descriptive title:
+        
+        {content}
+        
+        Title:"""
+        
+        response = llm.invoke(prompt)
+        name = response.content.strip().strip('"').strip("'")
+        
+        # Clean up and validate the name
+        name = re.sub(r'[^a-zA-Z0-9 ]', '', name)  # Remove special chars
+        name = name.strip()
+        
+        if not name or len(name.split()) > 5:
+            raise ValueError("Invalid name generated")
+            
+        return name if name else "Conversation"
+        
+    except Exception:
+        # Fallback to date-based name if generation fails
+        return datetime.now().strftime("%b %d Chat")
+
 # --------------------------
 # Streamlit UI Functions
 # --------------------------
@@ -206,8 +252,12 @@ def init_session_state() -> None:
         st.session_state.session_id = str(uuid.uuid4())
     if "selected_chat" not in st.session_state:
         st.session_state.selected_chat = None
+    if "chat_name" not in st.session_state:
+        st.session_state.chat_name = "New Chat"
+    if "search_tool" not in st.session_state:
+        st.session_state.search_tool = DuckDuckGoSearchRun()
 
-def save_current_chat() -> None:
+def save_current_chat(llm: ChatGroq = None) -> None:
     """Save the current chat session to disk."""
     messages = []
     for i in range(len(st.session_state["generated"])):
@@ -222,7 +272,12 @@ def save_current_chat() -> None:
             "timestamp": datetime.now().isoformat()
         })
     
-    save_chat_history(st.session_state.session_id, messages)
+    # Generate name if missing or default
+    if messages and (not st.session_state.get("chat_name") or 
+                     st.session_state.chat_name in ["New Chat", "Unnamed Chat"]):
+        st.session_state.chat_name = generate_chat_name(messages, llm)
+    
+    save_chat_history(st.session_state.session_id, messages, st.session_state.chat_name)
 
 def load_selected_chat(selected_chat: Dict) -> None:
     """Load a selected chat session into the current session."""
@@ -234,6 +289,20 @@ def load_selected_chat(selected_chat: Dict) -> None:
     st.session_state.session_id = selected_chat["session_id"]
     st.session_state.past = []
     st.session_state.generated = []
+    
+    # Generate name if chat is unnamed
+    if selected_chat.get("chat_name", "Unnamed Chat") == "Unnamed Chat":
+        chat_data = load_chat_session(selected_chat["session_id"])
+        if chat_data and chat_data.get("messages"):
+            st.session_state.chat_name = generate_chat_name(chat_data["messages"], llm)
+            # Update the saved chat with new name
+            save_chat_history(
+                selected_chat["session_id"],
+                chat_data["messages"],
+                st.session_state.chat_name
+            )
+    else:
+        st.session_state.chat_name = selected_chat.get("chat_name", "Unnamed Chat")
     
     # Clear the existing chat history in the store
     if st.session_state.session_id in store:
@@ -254,8 +323,113 @@ def load_selected_chat(selected_chat: Dict) -> None:
     st.session_state.selected_chat = selected_chat
     st.rerun()
 
-def create_conversational_retriever_chain(llm, retriever):
-    """Create a conversation-aware retriever chain."""
+
+def load_selected_chat(selected_chat: Dict) -> None:
+    """Load a selected chat session into the current session."""
+    # Save current chat before switching
+    if st.session_state.get("past"):
+        save_current_chat()
+    
+    # Set new session ID and clear UI state
+    st.session_state.session_id = selected_chat["session_id"]
+    st.session_state.past = []
+    st.session_state.generated = []
+    st.session_state.chat_name = selected_chat.get("chat_name", "Unnamed Chat")
+    
+    # Clear the existing chat history in the store
+    if st.session_state.session_id in store:
+        del store[st.session_state.session_id]
+    
+    # Load the chat history from file
+    chat_data = load_chat_session(selected_chat["session_id"])
+    if chat_data:
+        for msg in chat_data["messages"]:
+            if msg["type"] == "human":
+                st.session_state.past.append(msg["content"])
+            else:
+                st.session_state.generated.append(msg["content"])
+    
+    # Force refresh the chat history in LangChain's memory
+    get_session_history(st.session_state.session_id)
+    
+    st.session_state.selected_chat = selected_chat
+    st.rerun()
+
+def setup_sidebar(llm: ChatGroq) -> Dict:
+    """Configure the Streamlit sidebar with scrollable chat sessions."""
+    saved_chats = get_saved_chats()
+    
+    with st.sidebar:
+        st.header("Chat Management")
+        st.markdown(f"**Current Session ID:**\n`{st.session_state.session_id}`")
+        if st.session_state.get("chat_name"):
+            st.markdown(f"**Current Chat:** {st.session_state.chat_name}")
+        
+        st.divider()
+        
+        if st.button("➕ New Chat", use_container_width=True):
+            if st.session_state.get("past"):
+                save_current_chat(llm)
+            st.session_state.session_id = str(uuid.uuid4())
+            st.session_state.history = []
+            st.session_state.generated = []
+            st.session_state.past = []
+            st.session_state.selected_chat = None
+            st.session_state.chat_name = "New Chat"
+            st.rerun()
+        
+        st.divider()
+        st.subheader("Your Chat Sessions")
+        
+        if not saved_chats:
+            st.info("No saved chats yet")
+        else:
+            # Create a container with consistent button sizing
+            st.markdown("""
+            <style>
+                .chat-list {
+                    max-height: 400px;
+                    overflow-y: auto;
+                    margin-bottom: 10px;
+                }
+                .chat-btn {
+                    width: 100% !important;
+                    text-align: left !important;
+                    margin: 2px 0 !important;
+                    padding: 8px !important;
+                    border-radius: 4px !important;
+                    white-space: normal !important;
+                    height: auto !important;
+                    min-height: 40px !important;
+                }
+                .chat-btn:hover {
+                    background-color: #f0f2f6 !important;
+                }
+            </style>
+            <div class="chat-list">
+            """, unsafe_allow_html=True)
+            
+            for chat in saved_chats:
+                btn = st.button(
+                    f"{chat['chat_name']} ({chat['timestamp'][:10]})",
+                    key=f"chat_{chat['session_id']}",
+                    help=f"Load {chat['chat_name']}",
+                    use_container_width=True
+                )
+                if btn:
+                    load_selected_chat(chat)
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.divider()
+        st.markdown(f"📁 Current codebase: `{CODE_DIRECTORY}`")
+        st.markdown(f"💾 Vector store: `{CHROMA_DB_DIR}`")
+        st.markdown(f"🧠 Using model: `llama-3.1-8b-instant`")
+
+    return None
+
+def create_conversational_retriever_chain(llm, retriever, search_tool):
+    """Create a conversation-aware retriever chain with enhanced search capability."""
     from langchain.chains import ConversationalRetrievalChain
     from langchain.memory import ConversationBufferMemory
     
@@ -265,62 +439,67 @@ def create_conversational_retriever_chain(llm, retriever):
         output_key='answer'
     )
     
-    return ConversationalRetrievalChain.from_llm(
+    def should_search(query: str) -> bool:
+        """Determine if we should use web search for this query."""
+        search_triggers = [
+            'latest', 'recent', 'current', 'update', 'news',
+            'search', 'find', 'look up', '2023', '2024',
+            'today', 'now', 'this year', 'this month'
+        ]
+        query_lower = query.lower()
+        return any(trigger in query_lower for trigger in search_triggers)
+    
+    def format_response(response: str) -> str:
+        """Format the response to be more concise."""
+        # Remove redundant phrases
+        response = re.sub(r'(?i)based on (the|my) (information|knowledge|data).*?(?=\.|,|;|$)', '', response)
+        response = re.sub(r'\s+', ' ', response).strip()
+        
+        # Limit response length
+        max_length = 500
+        if len(response) > max_length:
+            response = response[:max_length] + "... [response truncated]"
+        
+        return response
+    
+    def augmented_invoke(inputs):
+        """Enhanced invoke with search capability and concise responses."""
+        query = inputs["question"]
+        
+        # First try the regular QA
+        result = qa_chain.invoke(inputs)
+        answer = result["answer"]
+        
+        # Enhance with web search if needed
+        if should_search(query):
+            try:
+                search_result = search_tool.run(query)
+                if search_result:
+                    answer = f"{format_response(answer)}\n\n🔍 Latest info from web:\n{format_response(search_result)}"
+            except Exception as e:
+                answer = f"{answer}\n\n[Web search failed: {str(e)}]"
+        
+        result["answer"] = format_response(answer)
+        return result
+    
+    # Create the base chain
+    qa_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=retriever,
         memory=memory,
         return_source_documents=True,
         verbose=True
     )
-
-def setup_sidebar() -> Dict:
-    """Configure the Streamlit sidebar and return selected chat."""
-    with st.sidebar:
-        st.header("Chat Sessions")
-        
-        # Chat session selector
-        saved_chats = get_saved_chats()
-        chat_options = {f"{chat['timestamp']} - {chat['preview']}": chat for chat in saved_chats}
-        
-        selected_chat_key = st.selectbox(
-            "Load previous chat:",
-            options=["New Chat"] + list(chat_options.keys()),
-            index=0,
-            help="Select a previous chat to continue"
-        )
-        
-        selected_chat = None
-        if selected_chat_key != "New Chat" and selected_chat_key in chat_options:
-            selected_chat = chat_options[selected_chat_key]
-            if st.button("Load Selected Chat"):
-                load_selected_chat(selected_chat)
-        
-        st.divider()
-        st.markdown(f"📁 Current codebase: `{CODE_DIRECTORY}`")
-        st.markdown(f"💾 Vector store: `{CHROMA_DB_DIR}`")
-        st.markdown(f"🧠 Using model: `llama-3.1-8b-instant`")
-        
-        if st.button("Save Current Chat"):
-            save_current_chat()
-            st.success("Chat history saved!")
-        
-        if st.button("New Chat Session"):
-            if st.session_state.get("past"):
-                save_current_chat()
-            st.session_state.session_id = str(uuid.uuid4())
-            st.session_state.history = []
-            st.session_state.generated = []
-            st.session_state.past = []
-            st.session_state.selected_chat = None
-            st.rerun()
-        
-        st.markdown("---")
-        st.markdown(f"**Current Session ID:**\n`{st.session_state.session_id}`")
     
-    return selected_chat
+    return augmented_invoke
 
-def setup_chat_interface(qa_chain) -> None:
-    """Configure the main chat interface."""
+
+def setup_chat_interface(qa_chain, llm: ChatGroq) -> None:
+    """Configure the main chat interface with concise responses."""
+    # Display chat name at the top if it exists
+    if st.session_state.get("chat_name") and st.session_state.chat_name != "New Chat":
+        st.subheader(st.session_state.chat_name)
+    
     response_container = st.container()
     container = st.container()
     
@@ -330,27 +509,48 @@ def setup_chat_interface(qa_chain) -> None:
             submit_button = st.form_submit_button(label='Send')
         
         if submit_button and user_input:
-            with st.spinner("Analyzing code..."):
-                # Use the appropriate chain based on whether we're using conversation history
-                if isinstance(qa_chain, RunnableWithMessageHistory):
-                    response = qa_chain.invoke(
-                        {"query": user_input},
-                        config={"configurable": {"session_id": st.session_state.session_id}}
-                    )
-                    result = response["result"]
-                else:
-                    response = qa_chain({"question": user_input})
-                    result = response["answer"]
+            with st.spinner("Generating response..."):
+                try:
+                    # Use the appropriate chain
+                    if isinstance(qa_chain, RunnableWithMessageHistory):
+                        response = qa_chain.invoke(
+                            {"query": user_input},
+                            config={"configurable": {"session_id": st.session_state.session_id}}
+                        )
+                        result = response["result"]
+                    else:
+                        response = qa_chain({"question": user_input})
+                        result = response["answer"]
+                    
+                    st.session_state.past.append(user_input)
+                    st.session_state.generated.append(result)
+                    
+                    # Auto-save after each message
+                    save_current_chat(llm)
+                    
+                    # Generate chat name after 2 messages if not already named
+                    if len(st.session_state.past) == 2 and st.session_state.chat_name == "New Chat":
+                        st.session_state.chat_name = generate_chat_name([
+                            {"type": "human", "content": st.session_state.past[0]},
+                            {"type": "ai", "content": st.session_state.generated[0]},
+                            {"type": "human", "content": st.session_state.past[1]},
+                            {"type": "ai", "content": result}
+                        ], llm)
+                        st.rerun()
                 
-                st.session_state.past.append(user_input)
-                st.session_state.generated.append(result)
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
     
     # Display chat history
     if st.session_state["generated"]:
         with response_container:
             for i in range(len(st.session_state["generated"])):
                 message(st.session_state["past"][i], is_user=True, key=f"{i}_user")
-                message(st.session_state["generated"][i], key=str(i))
+                message(
+                    st.session_state["generated"][i], 
+                    key=str(i),
+                    allow_html=True
+                )
 
 # --------------------------
 # Main Application
@@ -391,14 +591,14 @@ def main() -> None:
     init_session_state()
     
     # Setup sidebar and get selected chat
-    selected_chat = setup_sidebar()
+    selected_chat = setup_sidebar(llm)
     
     # Initialize the appropriate QA chain based on whether we're continuing a chat
     if selected_chat:
-        # Use conversational chain for continued chats
-        qa_chain = create_conversational_retriever_chain(llm, retriever)
+        # Use conversational chain for continued chats with search capability
+        qa_chain = create_conversational_retriever_chain(llm, retriever, st.session_state.search_tool)
     else:
-        # Use standard RetrievalQA for new chats
+        # Use standard RetrievalQA for new chats with message history
         qa_chain = RunnableWithMessageHistory(
             RetrievalQA.from_chain_type(
                 llm=llm,
@@ -426,7 +626,7 @@ def main() -> None:
     </style>
     """, unsafe_allow_html=True)
     
-    setup_chat_interface(qa_chain)
+    setup_chat_interface(qa_chain, llm)
 
 if __name__ == "__main__":
     main()
