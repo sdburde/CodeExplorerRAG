@@ -20,6 +20,9 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.tools import DuckDuckGoSearchRun
 from streamlit_chat import message
 
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
+
 # --------------------------
 # Constants and Configuration
 # --------------------------
@@ -279,7 +282,7 @@ def save_current_chat(llm: ChatGroq = None) -> None:
     
     save_chat_history(st.session_state.session_id, messages, st.session_state.chat_name)
 
-def load_selected_chat(selected_chat: Dict) -> None:
+def load_selected_chat(llm, selected_chat: Dict) -> None:
     """Load a selected chat session into the current session."""
     # Save current chat before switching
     if st.session_state.get("past"):
@@ -430,8 +433,7 @@ def setup_sidebar(llm: ChatGroq) -> Dict:
 
 def create_conversational_retriever_chain(llm, retriever, search_tool):
     """Create a conversation-aware retriever chain with enhanced search capability."""
-    from langchain.chains import ConversationalRetrievalChain
-    from langchain.memory import ConversationBufferMemory
+
     
     memory = ConversationBufferMemory(
         memory_key="chat_history",
@@ -495,62 +497,62 @@ def create_conversational_retriever_chain(llm, retriever, search_tool):
 
 
 def setup_chat_interface(qa_chain, llm: ChatGroq) -> None:
-    """Configure the main chat interface with concise responses."""
-    # Display chat name at the top if it exists
+    """Configure the main chat interface with simplified layout."""
+    # Display chat name if exists
     if st.session_state.get("chat_name") and st.session_state.chat_name != "New Chat":
         st.subheader(st.session_state.chat_name)
     
-    response_container = st.container()
-    container = st.container()
-    
-    with container:
-        with st.form(key='chat_form', clear_on_submit=True):
-            user_input = st.text_area("You:", key='input', height=100)
-            submit_button = st.form_submit_button(label='Send')
-        
-        if submit_button and user_input:
-            with st.spinner("Generating response..."):
-                try:
-                    # Use the appropriate chain
-                    if isinstance(qa_chain, RunnableWithMessageHistory):
-                        response = qa_chain.invoke(
-                            {"query": user_input},
-                            config={"configurable": {"session_id": st.session_state.session_id}}
-                        )
-                        result = response["result"]
-                    else:
-                        response = qa_chain({"question": user_input})
-                        result = response["answer"]
-                    
-                    st.session_state.past.append(user_input)
-                    st.session_state.generated.append(result)
-                    
-                    # Auto-save after each message
-                    save_current_chat(llm)
-                    
-                    # Generate chat name after 2 messages if not already named
-                    if len(st.session_state.past) == 2 and st.session_state.chat_name == "New Chat":
-                        st.session_state.chat_name = generate_chat_name([
-                            {"type": "human", "content": st.session_state.past[0]},
-                            {"type": "ai", "content": st.session_state.generated[0]},
-                            {"type": "human", "content": st.session_state.past[1]},
-                            {"type": "ai", "content": result}
-                        ], llm)
-                        st.rerun()
-                
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-    
     # Display chat history
-    if st.session_state["generated"]:
-        with response_container:
-            for i in range(len(st.session_state["generated"])):
-                message(st.session_state["past"][i], is_user=True, key=f"{i}_user")
-                message(
-                    st.session_state["generated"][i], 
-                    key=str(i),
-                    allow_html=True
-                )
+    for i in range(len(st.session_state["generated"])):
+        with st.chat_message("user"):
+            st.markdown(st.session_state["past"][i])
+        with st.chat_message("assistant"):
+            st.markdown(st.session_state["generated"][i])
+    
+    # Chat input at bottom
+    if user_query := st.chat_input("Ask about the code..."):
+        # Display user message immediately
+        with st.chat_message("user"):
+            st.markdown(user_query)
+        
+        # Show loading spinner
+        with st.spinner("Thinking..."):
+            try:
+                # Get AI response
+                if isinstance(qa_chain, RunnableWithMessageHistory):
+                    response = qa_chain.invoke(
+                        {"query": user_query},
+                        config={"configurable": {"session_id": st.session_state.session_id}}
+                    )
+                    result = response["result"]
+                else:
+                    response = qa_chain({"question": user_query})
+                    result = response["answer"]
+                
+                # Add to session state
+                st.session_state.past.append(user_query)
+                st.session_state.generated.append(result)
+                
+                # Display AI response
+                with st.chat_message("assistant"):
+                    st.markdown(result)
+                
+                # Auto-save
+                save_current_chat(llm)
+                
+                # Generate chat name if needed
+                if len(st.session_state.past) == 2 and st.session_state.chat_name == "New Chat":
+                    st.session_state.chat_name = generate_chat_name([
+                        {"type": "human", "content": st.session_state.past[0]},
+                        {"type": "ai", "content": st.session_state.generated[0]},
+                        {"type": "human", "content": st.session_state.past[1]},
+                        {"type": "ai", "content": result}
+                    ], llm)
+                    st.rerun()
+            
+            except Exception as e:
+                st.error(f"Error generating response: {str(e)}")
+
 
 # --------------------------
 # Main Application
@@ -566,7 +568,8 @@ def main() -> None:
     
     # Initialize components
     try:
-        llm = ChatGroq(model="llama-3.1-8b-instant") if os.getenv("GROQ_API_KEY") else None
+        # llm = ChatGroq(model="llama-3.1-8b-instant") if os.getenv("GROQ_API_KEY") else None
+        llm = ChatGroq(model="deepseek-r1-distill-llama-70b") if os.getenv("GROQ_API_KEY") else None
     except Exception:
         st.error("Failed to initialize LLM. Please check your GROQ_API_KEY")
         return

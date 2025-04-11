@@ -19,3 +19,8 @@ openai
 streamlit
 # ConversationalRetrievalQA
 streamlit-chat
+youtube_transcript_api
+bs4
+selenium
+yfinance
+schedule
